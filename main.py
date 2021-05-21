@@ -17,16 +17,20 @@ import pytesseract
 argparser = argparse.ArgumentParser()
 argparser.add_argument("file", type=Path)
 
+
 class BaseOCREngine:
 
     def read_cell(self, cell: np.ndarray) -> str:
         raise NotImplemented()
 
+
 class EasyOCREngine(BaseOCREngine):
     pass
 
+
 class PyTesseractEngine(BaseOCREngine):
     pass
+
 
 @dataclass
 class Cell:
@@ -46,46 +50,186 @@ class Row:
     cells: List[Cell] = field(default=list)
 
 
-class TableRecognizer:
-    # countcol(width) of kernel as 100th of total width
-    kernel_len = np.array(img).shape[1] // 100
-    # Defining a vertical kernel to detect all vertical lines of image
-    ver_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, kernel_len))
-    # Defining a horizontal kernel to detect all horizontal lines of image
-    hor_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_len, 1))
-    # A kernel of 2x2
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+@dataclass
+class Table:
+    columns: List[Column]
+    rows: List[Row]
 
-    def __init__(self):
+    def __init__(self, img: np.ndarray):
+        self.img = img
         self.intermediate_stages: Dict[str, np.ndarray] = {}
-        self.log_intermediate : bool = False
+        self.log_intermediate: bool = False
 
-    def _load_img(self, img_path: Path):
-        pass
+    def init_kernels(self, img: np.ndarray):
+        # countcol(width) of kernel as 100th of total width
+        self.kernel_len = np.array(img).shape[1] // 100
+        # Defining a vertical kernel to detect all vertical lines of image
+        self.ver_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, kernel_len))
+        # Defining a horizontal kernel to detect all horizontal lines of image
+        self.hor_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_len, 1))
+        # A kernel of 2x2
+        self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
 
     def detect_vertical_lines(self, img: np.ndarray) -> np.ndarray:
         # Use vertical kernel to detect vertical lines
-        eroded = cv2.erode(img, ver_kernel, iterations=3)
-        vertical_lines = cv2.dilate(eroded, ver_kernel, iterations=3)
+        eroded = cv2.erode(img, self.ver_kernel, iterations=3)
+        vertical_lines = cv2.dilate(eroded, self.ver_kernel, iterations=3)
         if self.log_intermediate:
             self.intermediate_stages["vertical_lines"] = vertical_lines
         return vertical_lines
 
     def detect_horizontal_lines(self, img: np.ndarray) -> np.ndarray:
         # Use vertical kernel to detect vertical lines
-        eroded = cv2.erode(img, hor_kernel, iterations=3)
-        horizontal_lines = cv2.dilate(eroded, hor_kernel, iterations=3)
+        eroded = cv2.erode(img, self.hor_kernel, iterations=3)
+        horizontal_lines = cv2.dilate(eroded, self.hor_kernel, iterations=3)
         if self.log_intermediate:
             self.intermediate_stages["horizontal_lines"] = horizontal_lines
         return horizontal_lines
+
+    def detect_cells_contours(self,
+                              vertical_lines: np.ndarray,
+                              horizontal_lines: np.ndarray):
+        # Combine horizontal and vertical lines in a new third image, with both having same weight.
+        img_vh = cv2.addWeighted(vertical_lines, 0.5, horizontal_lines, 0.5, 0.0)
+        # Eroding and thesholding the image
+        img_vh = cv2.erode(~img_vh, kernel, iterations=2)
+        thresh, img_vh = cv2.threshold(img_vh, 128, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+        if self.log_intermediate:
+            self.intermediate_stages["table_outline"] = img_vh
+        bitxor = cv2.bitwise_xor(img, img_vh)
+        bitnot = cv2.bitwise_not(bitxor)
+
+        # Detect contours for following box detection
+        contours, hierarchy = cv2.findContours(img_vh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        return bitnot, contours, hierarchy
+
+    @staticmethod
+    def sort_contours(cnts, method="left-to-right"):
+        # initialize the reverse flag and sort index
+        reverse = False
+        i = 0
+        # handle if we need to sort in reverse
+        if method == "right-to-left" or method == "bottom-to-top":
+            reverse = True
+        # handle if we are sorting against the y-coordinate rather than
+        # the x-coordinate of the bounding box
+        if method == "top-to-bottom" or method == "bottom-to-top":
+            i = 1
+        # construct the list of bounding boxes and sort them from top to
+        # bottom
+        boundingBoxes = [cv2.boundingRect(c) for c in cnts]
+        (cnts, boundingBoxes) = zip(*sorted(zip(cnts, boundingBoxes),
+                                            key=lambda b: b[1][i], reverse=reverse))
+        # return the list of sorted contours and bounding boxes
+        return (cnts, boundingBoxes)
+
+    def set_header(self, row: Union[Row, int] = 0):
+        pass
+
+    def set_index(self, column: Union[Column, int] = 0):
+        pass
+
+    def read_cells(self):
+        pass
+
+    def detect_cells(self):
+        vertical_lines = self.detect_vertical_lines(img_bin)
+        horizontal_lines = self.detect_horizontal_lines(img_bin)
+
+        bitnot, contours, hierarchy = self.detect_cells_contours(vertical_lines,
+                                                                 horizontal_lines)
+        # Sort all the contours by top to bottom.
+        contours, boundingBoxes = self.sort_contours(contours, method="top-to-bottom")
+
+        # Creating a list of heights for all detected boxes
+        heights = [boundingBoxes[i][3] for i in range(len(boundingBoxes))]
+
+        # Get mean of heights
+        mean = np.mean(heights)
+
+        # Create list box to store all boxes in
+        all_cells = []
+        if self.log_intermediate:
+            contoured_cells = self.img.copy()
+        # Get position (x,y), width and height for every contour and show the contour on image
+        for c in contours:
+            x, y, w, h = cv2.boundingRect(c)
+            # cell/box is kept if not too big enough
+            if (w < 1000 and h < 500):
+                if self.log_intermediate:
+                    contoured_cells = cv2.rectangle(contoured_cells,
+                                                    (x, y),
+                                                    (x + w, y + h),
+                                                    (0, 255, 0),
+                                                    2)
+                all_cells.append([x, y, w, h])
+
+        # Creating two lists to define row and column in which cell is located
+        columns = []
+        current_col = []
+        previous = None
+        # TODO: replace cell tuple by cell object
+        # TODO: figure out actual meaning of columns/current_col
+        # Sorting the boxes to their respective row and column
+        for cell in all_cells:
+
+            if previous is None:
+                current_col.append(cell)
+                previous = cell
+
+            else:
+                if (cell[1] <= previous[1] + mean / 2):
+                    current_col.append(cell)
+                    previous = cell
+
+                    if (i == len(all_cells) - 1):
+                        columns.append(current_col)
+
+                else:
+                    columns.append(current_col)
+                    current_col = []
+                    previous = cell
+                    current_col.append(cell)
+
+        if self.log_intermediate:
+            self.intermediate_stages["contoured_cells"] = contoured_cells
+
+        # calculating maximum number of cells per row, i.e., max number of columns
+        countcol = max(len(r) for r in columns)
+
+        # Retrieving the center of each column
+        center = [int(columns[i][j][0] + columns[i][j][2] / 2)
+                  for j in range(len(columns[i])) if columns[0]]
+
+        center = np.array(center)
+        center.sort()
+
+        # Regarding the distance to the columns center, the boxes are arranged in respective order
+        finalboxes = []
+        for col in columns:
+            lis = []
+            for k in range(countcol):
+                lis.append([])
+            for j in range(len(columns[i])):
+                diff = abs(center - (col[j][0] + col[j][2] / 4))
+                minimum = min(diff)
+                indexing = list(diff).index(minimum)
+                lis[indexing].append(col[j])
+            finalboxes.append(lis)
+
+
+class TableRecognizer:
+
+    def __init__(self):
+        self.intermediate_stages: Dict[str, np.ndarray] = {}
+        self.log_intermediate: bool = False
 
     def read_table(self, img: Union[str, Path, np.ndarray]) -> pd.DataFrame:
         if isinstance(img, (Path, str)):
             img = cv2.imread(str(img))
 
         img_bin = 255 - img
-        vertical_lines = self.detect_vertical_lines(img_bin)
-        horizontal_lines =
+
 
 if __name__ == '__main__':
     args = argparser.parse_args()
