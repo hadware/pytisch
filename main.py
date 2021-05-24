@@ -115,13 +115,11 @@ class LinesDetector:
 
     def init_kernels(self, img: np.ndarray):
         # countcol(width) of kernel as 100th of total width
-        self.kernel_len = np.array(img).shape[1] // 100
+        kernel_len = np.array(img).shape[1] // 100
         # Defining a vertical kernel to detect all vertical lines of image
         self.ver_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, kernel_len))
         # Defining a horizontal kernel to detect all horizontal lines of image
         self.hor_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_len, 1))
-        # A kernel of 2x2
-        self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
 
     def detect_vertical_lines(self, img: np.ndarray) -> np.ndarray:
         # Use vertical kernel to detect vertical lines
@@ -338,6 +336,7 @@ def detect_table(img: np.ndarray,
     img_bin = 255 - img_bin
 
     lines_detector = LinesDetector()
+    lines_detector.init_kernels(img)
     cell_detector = CellDetector(lines_detector)
     cells = cell_detector.detect_cells(img_bin, img)
     if cell_allocation == "gmm":
