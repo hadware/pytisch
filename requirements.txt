@@ -1,6 +1,0 @@
-opencv-python
-pytesseract
-numpy
-pandas
-matplotlib
-Pillow==2.2.1
