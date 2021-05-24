@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Dict, List, Union, Optional, TYPE_CHECKING, Any, Tuple, DefaultDict
 
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
@@ -17,7 +16,6 @@ try:
     from PIL import Image
 except ImportError:
     import Image
-import pytesseract
 
 if TYPE_CHECKING:
     try:
@@ -331,20 +329,7 @@ class Table:
                 if cell is None:
                     continue
                 cell.read_text(self.img, ocr_engine)
-
-
-class TableRecognizer:
-
-    def __init__(self):
-        self.intermediate_stages: Dict[str, np.ndarray] = {}
-        self.log_intermediate: bool = False
-
-    def read_table(self, img: Union[str, Path, np.ndarray]) -> pd.DataFrame:
-        if isinstance(img, (Path, str)):
-            img = cv2.imread(str(img))
-
-        img_bin = 255 - img
-
+d
 
 def detect_table(img: np.ndarray,
                  cell_allocation: Literal["gmm", "classic"] = "gmm") -> Table:
@@ -373,7 +358,6 @@ def read_table(img: np.ndarray,
 
 
 if __name__ == '__main__':
-
     argparser = argparse.ArgumentParser()
     argparser.add_argument("file", type=Path)
 
