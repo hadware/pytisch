@@ -3,7 +3,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import reduce
 from pathlib import Path
-from typing import Dict, List, Union, Optional, TYPE_CHECKING, Any, Tuple, DefaultDict
+from typing import Dict, List, Union, Optional, TYPE_CHECKING, Any, Tuple, DefaultDict, Callable
 
 import cv2
 import numpy as np
@@ -45,7 +45,7 @@ class BaseOCREngine:
 
 class EasyOCREngine(BaseOCREngine):
 
-    def __init__(self, reader: Optional[Reader], text_read_args: Dict[str, Any], cropping: CropParam = 0):
+    def __init__(self, reader: Optional['Reader'], text_read_args: Dict[str, Any], cropping: CropParam = 0):
         super().__init__(cropping)
         if reader is None:
             from easyocr import Reader
@@ -78,8 +78,9 @@ class Cell:
     y: int
     w: int
     h: int
-    text: Optional[str] = field(init=False, compare=False)
-    ocr_engine: Optional[BaseOCREngine] = field(init=False, compare=False)
+    text: Optional[str] = field(init=False, compare=False, default=None)
+    ocr_engine: Optional[BaseOCREngine] = field(init=False, compare=False, default=None)
+    caster: Optional[Callable[[str], Any]] = field(init=False, compare=False, default=str)
 
     def read_text(self, img: np.ndarray, ocr_engine: BaseOCREngine):
         # cropping the original image to the cell's position.
@@ -91,6 +92,10 @@ class Cell:
         cell_img = ocr_engine.preprocess(cell_img)
         self.text = ocr_engine.read_cell(cell_img)
 
+    @property
+    def value(self):
+        return self.caster(self.text) if self.text is not None else None
+
     def __or__(self, other: 'Cell'):
         return Cell(min(self.x, other.x),
                     min(self.y, other.y),
@@ -100,7 +105,7 @@ class Cell:
 
 @dataclass
 class CellSet:
-    cells: List[Optional[Cell]] = field(default=list)
+    cells: List[Optional[Cell]] = field(default_factory=list)
 
     @property
     def supercell(self) -> Cell:
@@ -169,7 +174,8 @@ class CellDetector:
         vertical_lines = self.lines_detector.detect_vertical_lines(img_bin)
         horizontal_lines = self.lines_detector.detect_horizontal_lines(img_bin)
 
-        bitnot, contours, hierarchy = self.detect_cells_contours(vertical_lines,
+        bitnot, contours, hierarchy = self.detect_cells_contours(img,
+                                                                 vertical_lines,
                                                                  horizontal_lines)
         all_cells: List[Cell] = []
         if self.log_intermediate:
@@ -186,7 +192,7 @@ class CellDetector:
                                                     (x + w, y + h),
                                                     (0, 255, 0),
                                                     10)
-                all_cells.append(Cell(x=x, y=x, w=w, h=h))
+                all_cells.append(Cell(x=x, y=y, w=w, h=h))
 
         if self.log_intermediate:
             self.intermediate_stages["contoured_cells"] = contoured_cells
@@ -236,7 +242,11 @@ class GMMCellAllocator(BaseCellAllocator):
         rows = self.gmm_allocation(horizontal_lines.sum(axis=1), horizontal_cells_pos, cells)
         for row in rows:
             row.cells.sort(key=lambda c: c.x)
-        return columns, rows
+
+        columns.sort(key=lambda col: col.supercell.x)
+        rows.sort(key=lambda row: row.supercell.y)
+
+        return rows, columns
 
 
 class ClassicCellAllocator(BaseCellAllocator):
@@ -250,7 +260,7 @@ class ClassicCellAllocator(BaseCellAllocator):
         current_row = []
         previous = None
         # Sorting the boxes to their respective row
-        for cell in cells:
+        for cell in y_sorted_cells:
 
             if previous is None:
                 current_row.append(cell)
@@ -258,7 +268,7 @@ class ClassicCellAllocator(BaseCellAllocator):
 
             else:
                 # if current cell isn't "under" the former, add it to current row
-                if cell.y <= previous.y + heights_mean / 2:
+                if cell.y <= previous.y + (heights_mean / 2):
                     current_row.append(cell)
                     previous = cell
 
@@ -288,8 +298,9 @@ class ClassicCellAllocator(BaseCellAllocator):
         center.sort()
 
         # Assigning the cell in each row to the column it's closest to
-        final_columns = [CellSet([None for _ in range(len(rows))])]
-        final_rows = [CellSet([None for _ in range(len(rows))])]
+        row_count = len(rows)
+        final_columns = [CellSet([None for j in range(row_count)]) for _ in range(column_count)]
+        final_rows = [CellSet([None for i in range(column_count)]) for _ in range(row_count)]
         for row_id, row in enumerate(rows):
             for cell in row:
                 diff = np.abs(center - (cell.x + cell.w / 4))
@@ -305,12 +316,18 @@ class Table:
     rows: List[CellSet]
     columns: List[CellSet]
     img: np.ndarray
+    header_row: Optional[CellSet] = field(init=False, default=None)
+    index_column: Optional[CellSet] = field(init=False, default=None)
 
     def set_header_row(self, row: Union[CellSet, int] = 0):
-        pass
+        if isinstance(row, int):
+            row = self.rows[row]
+        self.header_row = row
 
     def set_index_col(self, column: Union[CellSet, int] = 0):
-        pass
+        if isinstance(column, int):
+            column = self.columns[column]
+        self.index_column = column
 
     def set_ocr_engine(self, cell_set: Union[CellSet, int],
                        ocr_engine: BaseOCREngine,
@@ -327,7 +344,26 @@ class Table:
                 if cell is None:
                     continue
                 cell.read_text(self.img, ocr_engine)
-d
+
+    def to_dataframe(self) -> pd.DataFrame:
+        if self.header_row is not None:
+            data = []
+            not_header = [row for row in self.rows if row != self.header_row]
+            for row in not_header:
+                for header_cell, cell in zip(self.header_row.cells, row.cells):
+                    data.append({
+                        header_cell.value: cell.value
+                    })
+            df = pd.DataFrame.from_dict(data)
+        else:
+            data = []
+            for row in self.rows:
+                data.append((cell.value for cell in row.cells))
+            df = pd.DataFrame(data)
+        if self.index_column:
+            df.set_index(self.columns.index(self.index_column))
+        return df
+
 
 def detect_table(img: np.ndarray,
                  cell_allocation: Literal["gmm", "classic"] = "gmm") -> Table:
@@ -345,6 +381,7 @@ def detect_table(img: np.ndarray,
         cell_allocator = ClassicCellAllocator()
     rows, columns = cell_allocator.place_cells(img_bin, cells)
     table = Table(rows, columns, img_bin)
+    # todo sort col, row by x/y
     return table
 
 
